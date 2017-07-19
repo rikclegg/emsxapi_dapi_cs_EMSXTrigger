@@ -39,7 +39,7 @@ namespace com.bloomberg.samples
 
         /* Run with:-
          *     EMSXTrigger 
-	     *         SELLAT=163.4 BUYAT=154.7 AMOUNT=1000 TICKER="IBM US Equity" 
+	     *         SELLAT=ASK BUYAT=BID AMOUNT=1000 TICKER="IBM US Equity" 
 	     */
 
         private static readonly Name ORDER_ROUTE_FIELDS = new Name("OrderRouteFields");
