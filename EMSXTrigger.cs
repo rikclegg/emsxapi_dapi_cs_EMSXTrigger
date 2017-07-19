@@ -39,7 +39,7 @@ namespace com.bloomberg.samples
 
         /* Run with:-
          *     EMSXTrigger 
-	     *         SELLAT=ASK BUYAT=BID AMOUNT=1000 TICKER="IBM US Equity" 
+	     *         SELLAT=[BID,ASK,MID] BUYAT=[BID,ASK,MID] AMOUNT=1000 TICKER="IBM US Equity" 
 	     */
 
         private static readonly Name ORDER_ROUTE_FIELDS = new Name("OrderRouteFields");
@@ -95,8 +95,10 @@ namespace com.bloomberg.samples
         private Service refdata;
         private Service emapisvc;
 
-        private double sellat = 0;
-        private double buyat = 0;
+        private string[] pricePoints = {"BID","ASK"};
+
+        private String sellat;
+        private String buyat;
         private int amount = 0;
         private string ticker = "";
 
@@ -112,7 +114,7 @@ namespace com.bloomberg.samples
 
         public static void Main(string[] args)
         {
-            System.Console.WriteLine("Bloomberg - EMSX API Example - EMSXSubscriptionsOrdersAsync");
+            System.Console.WriteLine("Bloomberg - EMSX API Example - EMSXTrigger");
             System.Console.WriteLine("Press ENTER at anytime to quit");
 
             EMSXTrigger example = new EMSXTrigger();
@@ -266,7 +268,7 @@ namespace com.bloomberg.samples
 
                         mktdata_sub_id = new CorrelationID(4);
 
-                        mktdata_sub = new Subscription(ticker, "LAST_PRICE", mktdata_sub_id);
+                        mktdata_sub = new Subscription(ticker, "LAST_PRICE, BID, ASK", mktdata_sub_id);
                         System.Console.WriteLine("Market Data Topic: " + mktdata_sub);
                         mktdata_subscriptions.Add(mktdata_sub);
 
@@ -1007,6 +1009,8 @@ namespace com.bloomberg.samples
 
         private bool parseCommandLine(string[] args)
         {
+            bool valid = true;
+
             if (args.Length < 4)
             {
                 System.Console.WriteLine("Error: Missing required parameters\n");
@@ -1017,16 +1021,30 @@ namespace com.bloomberg.samples
             {
                 for (int i = 0; i < args.Length; i++)
                 {
-                    if (isArg(args[i], "SELLAT")) sellat = System.Convert.ToDouble(getArgValue(args[i]));
-                    else if (isArg(args[i], "BUYAT")) buyat = System.Convert.ToDouble(getArgValue(args[i]));
+                    if (isArg(args[i], "SELLAT"))
+                    {
+                        sellat = getArgValue(args[i]);
+                        if (Array.Exists(pricePoints, element => element == sellat)) valid = false;
+
+                    }
+                    else if (isArg(args[i], "BUYAT"))
+                    {
+                        buyat = getArgValue(args[i]);
+                        if (Array.Exists(pricePoints, element => element == buyat)) valid = false;
+                    }
                     else if (isArg(args[i], "AMOUNT")) amount = System.Convert.ToInt32(getArgValue(args[i]));
                     else if (isArg(args[i], "TICKER")) ticker = getArgValue(args[i]);
-                    else System.Console.WriteLine("Warning>> Unknown parameter:" + args[i]);
+                    else
+                    {
+                        System.Console.WriteLine("Warning>> Unknown parameter:" + args[i]);
+                        valid = false;
+                    }
+
                 }
 
-                showParameters();
+                if(valid) showParameters();
             }
-            return true;
+            return valid;
         }
 
         private void showParameters()
@@ -1053,7 +1071,7 @@ namespace com.bloomberg.samples
         private void printUsage()
         {
             System.Console.WriteLine("Usage:");
-            System.Console.WriteLine("EMSXCreateOrderAsyncRequest SELLAT=<value> BUYAT=<value> AMOUNT=<value> TICKER=\"<value>\"");
+            System.Console.WriteLine("EMSXCreateOrderAsyncRequest SELLAT=[BID,MID,ASK] BUYAT=[BID,MID,ASK] AMOUNT=<value> TICKER=\"<value>\"");
         }
     }
 }
