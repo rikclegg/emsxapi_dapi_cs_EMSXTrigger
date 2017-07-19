@@ -540,6 +540,7 @@ namespace com.bloomberg.samples
                     {
                         System.Console.WriteLine("MktData: LAST_PRICE = " + last_price.ToString("0.0000"));
 
+                        /*
                         if (last_price < buyat || last_price > sellat)
                         {
                             Request request = emapisvc.CreateRequest("CreateOrderAndRoute");
@@ -564,6 +565,7 @@ namespace com.bloomberg.samples
                             session.SendRequest(request, requestID);
 
                         }
+                        */
                     }
                 }
                 else if (msg.CorrelationID == order_sub_id || msg.CorrelationID == route_sub_id)
