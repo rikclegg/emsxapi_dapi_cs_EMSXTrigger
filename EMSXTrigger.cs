@@ -30,7 +30,9 @@ using Message = Bloomberglp.Blpapi.Message;
 using EventHandler = Bloomberglp.Blpapi.EventHandler;
 using Subscription = Bloomberglp.Blpapi.Subscription;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System;
+using System.Threading;
 
 namespace com.bloomberg.samples
 {
@@ -104,26 +106,24 @@ namespace com.bloomberg.samples
 
         private int emsx_req_id = 100;
 
-        public class IDSequenceMap {
-            public CorrelationID requestID;
-            public int sequenceNo;
-            public int routeID;
-        }
-        
-        private List<IDSequenceMap> idMapping = new List<IDSequenceMap>();
+        public ConcurrentQueue<Request> pendingTrades = new ConcurrentQueue<Request>();
+        public ConcurrentDictionary<CorrelationID, Request> outstandingRequests = new ConcurrentDictionary<CorrelationID,Request>();
+        public static readonly object logLock = new object();
 
         private double lastBid=0;
         private double lastAsk=0;
 
+        private Dispatcher dispatcher;
+        Thread dispatcherThread;
+
         public static void Main(string[] args)
         {
-            System.Console.WriteLine("Bloomberg - EMSX API Example - EMSXTrigger");
-            System.Console.WriteLine("Press ENTER at anytime to quit");
+            log("Bloomberg - EMSX API Example - EMSXTrigger");
+            log("Press ENTER at anytime to quit");
 
             EMSXTrigger example = new EMSXTrigger();
             example.run(args);
 
-            System.Console.Read();
         }
 
         public EMSXTrigger()
@@ -150,7 +150,17 @@ namespace com.bloomberg.samples
             d_sessionOptions.ServerPort = d_port;
 
             Session session = new Session(d_sessionOptions, new EventHandler(processEvent));
+
+            dispatcher = new Dispatcher(session, pendingTrades, outstandingRequests);
+            dispatcherThread = new Thread(new ThreadStart(dispatcher.dispatch));
+            dispatcherThread.Start();
+
             session.StartAsync();
+
+            System.Console.Read();
+            dispatcherThread.Abort();
+            dispatcherThread.Join();
+
         }
 
         public void processEvent(Event evt, Session session)
@@ -185,59 +195,60 @@ namespace com.bloomberg.samples
             }
             catch (Exception e)
             {
-                System.Console.Error.WriteLine("Error: " + e.ToString());
+                logErr("Error: " + e.ToString());
             }
         }
 
         private void processAdminEvent(Event evt, Session session)
         {
-            System.Console.WriteLine("Processing " + evt.Type);
+            log("Processing " + evt.Type);
 
             foreach (Message msg in evt)
             {
                 if (msg.MessageType.Equals(SLOW_CONSUMER_WARNING))
                 {
-                    System.Console.Error.WriteLine("Warning: Entered Slow Consumer status");
+                    logErr("Warning: Entered Slow Consumer status");
                 }
                 else if (msg.MessageType.Equals(SLOW_CONSUMER_WARNING_CLEARED))
                 {
-                    System.Console.WriteLine("Slow consumer status cleaered");
+                    logErr("Slow consumer status cleaered");
                 }
             }
         }
 
         private void processSessionEvent(Event evt, Session session)
         {
-            System.Console.WriteLine("Processing " + evt.Type);
+            log("Processing " + evt.Type);
             foreach (Message msg in evt)
             {
                 if (msg.MessageType.Equals(SESSION_STARTED))
                 {
-                    System.Console.WriteLine("Session started...");
+                    log("Session started...");
                     session.OpenServiceAsync(service_refdata);
                 }
                 else if (msg.MessageType.Equals(SESSION_STARTUP_FAILURE))
                 {
-                    System.Console.Error.WriteLine("Error: Session startup failed");
+                    logErr("Error: Session startup failed");
                 }
                 else if (msg.MessageType.Equals(SESSION_TERMINATED))
                 {
-                    System.Console.Error.WriteLine("Error: Session has been terminated");
+                    log("Error: Session has been terminated");
                 }
                 else if (msg.MessageType.Equals(SESSION_CONNECTION_UP))
                 {
-                    System.Console.WriteLine("Session connection is up");
+                    log("Session connection is up");
                 }
                 else if (msg.MessageType.Equals(SESSION_CONNECTION_DOWN))
                 {
-                    System.Console.Error.WriteLine("Error: Session connection is down");
+                    log("Error: Session connection is down");
                 }
             }
         }
 
         private void processServiceEvent(Event evt, Session session)
         {
-            System.Console.WriteLine("Processing " + evt.Type);
+            log("Processing " + evt.Type);
+
             foreach (Message msg in evt)
             {
                 // Identify which service this message belongs to...
@@ -245,7 +256,7 @@ namespace com.bloomberg.samples
 
                 if (msg.MessageType.Equals(SERVICE_OPENED))
                 {
-                    System.Console.WriteLine("Service opened [" + svc + "]...");
+                    log("Service opened [" + svc + "]...");
 
                     if (svc == service_refdata)
                     {
@@ -263,31 +274,31 @@ namespace com.bloomberg.samples
                 }
                 else if (msg.MessageType.Equals(SERVICE_OPEN_FAILURE))
                 {
-                    System.Console.Error.WriteLine("Error: Service failed to open [" + svc + "]");
+                    logErr("Error: Service failed to open [" + svc + "]");
                 }
             }
         }
 
         private void processSubscriptionStatusEvent(Event evt, Session session)
         {
-            System.Console.WriteLine("Processing " + evt.Type);
+            log("Processing " + evt.Type);
             foreach (Message msg in evt)
             {
                 if (msg.MessageType.Equals(SUBSCRIPTION_STARTED))
                 {
                     if (msg.CorrelationID == mktdata_sub_id)
                     {
-                        System.Console.WriteLine("Subscription started [" + service_mktdata + "]");
+                        log("Subscription started [" + service_mktdata + "]");
                     }
                     else if (msg.CorrelationID == order_sub_id)
                     {
-                        System.Console.WriteLine("Subscription started [" + service_emsx + " -  Orders]");
+                        log("Subscription started [" + service_emsx + " -  Orders]");
                         // create the Route subscription
                         createRouteSubscription(session);
                     }
                     else if (msg.CorrelationID == route_sub_id)
                     {
-                        System.Console.WriteLine("Subscription started [" + service_emsx + " - Routes]");
+                        log("Subscription started [" + service_emsx + " - Routes]");
                         // Open the market data service.
                         session.OpenServiceAsync(service_mktdata);
                     }
@@ -295,20 +306,20 @@ namespace com.bloomberg.samples
                 }
                 else if (msg.MessageType.Equals(SUBSCRIPTION_FAILURE))
                 {
-                    System.Console.Error.WriteLine("Error: Subscription failed");
-                    System.Console.WriteLine("MESSAGE: " + msg);
+                    logErr("Error: Subscription failed");
+                    log("MESSAGE: " + msg);
                 }
                 else if (msg.MessageType.Equals(SUBSCRIPTION_TERMINATED))
                 {
-                    System.Console.Error.WriteLine("Error: Subscription terminated");
-                    System.Console.WriteLine("MESSAGE: " + msg);
+                    logErr("Error: Subscription terminated");
+                    log("MESSAGE: " + msg);
                 }
             }
         }
 
         private void processSubscriptionDataEvent(Event evt, Session session)
         {
-            //System.Console.WriteLine("Processing " + evt.Type);
+            //log("Processing " + evt.Type);
             foreach (Message msg in evt)
             {
                 if (msg.CorrelationID == mktdata_sub_id)
@@ -322,7 +333,7 @@ namespace com.bloomberg.samples
                     if ((bidPrice > 0 || askPrice > 0) && (lastBid > 0 && lastAsk > 0))
                     {
 
-                        System.Console.WriteLine("Trading at " + bidPrice + "/" + askPrice);
+                        log("Trading at " + bidPrice + "/" + askPrice);
                         sendTradeRequest(session, "BUY", buyat == "BID" ? lastBid : lastAsk);
                         sendTradeRequest(session, "SELL", sellat == "BID" ? lastBid : lastAsk);
                     }
@@ -350,7 +361,7 @@ namespace com.bloomberg.samples
                             int emsxFilled = msg.HasElement("EMSX_FILLED") ? msg.GetElementAsInt32("EMSX_FILLED") : 0;
                             double emsxAvgPrice = msg.HasElement("EMSX_AVG_PRICE") ? msg.GetElementAsFloat64("EMSX_AVG_PRICE") : 0;
 
-                            System.Console.WriteLine("Order event (" + eventStatus + "): Sequence=" + emsxSequence + "\tStatus=" + emsxStatus + "\tTicker=" + emsxTicker + "\tAmount=" + emsxAmount + "\tWorking=" + emsxWorking + "\tFilled=" + emsxFilled + "\tAveragePrice=" + emsxAvgPrice);
+                            log("Order event (" + eventStatus + "): Sequence=" + emsxSequence + "\tStatus=" + emsxStatus + "\tTicker=" + emsxTicker + "\tAmount=" + emsxAmount + "\tWorking=" + emsxWorking + "\tFilled=" + emsxFilled + "\tAveragePrice=" + emsxAvgPrice);
 
                         }
                         else if (msgSubType == "R")
@@ -364,13 +375,13 @@ namespace com.bloomberg.samples
                             int emsxFilled = msg.HasElement("EMSX_FILLED") ? msg.GetElementAsInt32("EMSX_FILLED") : 0;
                             double emsxAvgPrice = msg.HasElement("EMSX_AVG_PRICE") ? msg.GetElementAsFloat64("EMSX_AVG_PRICE") : 0;
 
-                            System.Console.WriteLine("Route event (" + eventStatus + "): Sequence=" + emsxSequence + "\tStatus=" + emsxStatus + "\tWorking=" + emsxWorking + "\tFilled=" + emsxFilled + "\tAveragePrice=" + emsxAvgPrice);
+                            log("Route event (" + eventStatus + "): Sequence=" + emsxSequence + "\tStatus=" + emsxStatus + "\tWorking=" + emsxWorking + "\tFilled=" + emsxFilled + "\tAveragePrice=" + emsxAvgPrice);
                         }
                     }
                 }
                 else
                 {
-                    System.Console.Error.WriteLine("Error: Unexpected message");
+                    logErr("Error: Unexpected message");
                 }
 
             }
@@ -378,20 +389,20 @@ namespace com.bloomberg.samples
 
         private void processResponseEvent(Event evt, Session session)
         {
-            System.Console.WriteLine("Processing " + evt.Type);
+            log("Processing " + evt.Type);
 
             foreach (Message msg in evt)
             {
                 if (msg.CorrelationID == refdata_req_id)
                 {
-                    System.Console.WriteLine("RefData RESPONSE received...");
+                    log("RefData RESPONSE received...");
 
                     Element securities = msg.GetElement(SECURITY_DATA);
                     Element security = securities.GetValueAsElement(0);
                     Element fields = security.GetElement(FIELD_DATA);
                     String ticker_desc = fields.GetElementAsString("PARSEKYABLE_DES_SOURCE");
                     
-                    System.Console.WriteLine("Ticker Description: " + ticker_desc);
+                    log("Ticker Description: " + ticker_desc);
 
                     // Open EMSX service...
                     session.OpenServiceAsync(service_emsx);
@@ -407,29 +418,19 @@ namespace com.bloomberg.samples
                         int errorCode = msg.GetElementAsInt32("ERROR_CODE");
                         string errorMessage = msg.GetElementAsString("ERROR_MESSAGE");
 
-                        System.Console.WriteLine("RESPONSE ERROR\nERROR CODE: " + errorCode + "\tERROR MESSAGE: " + errorMessage);
+                        log("RESPONSE ERROR\nERROR CODE: " + errorCode + "\tERROR MESSAGE: " + errorMessage);
                     }
                     else if (msg.MessageType.Equals(CREATE_ORDER_AND_ROUTE_EX))
                     {
-                        //System.Console.WriteLine("CREATE_ORDER_AND_ROUTE Response received...");
 
-                        int emsx_sequence = msg.GetElementAsInt32("EMSX_SEQUENCE");
-                        int emsx_route_id = msg.GetElementAsInt32("EMSX_ROUTE_ID");
-                        string message = msg.GetElementAsString("MESSAGE");
-
-                        //System.Console.WriteLine("EMSX_SEQUENCE: " + emsx_sequence.ToString() + "\tEMSX_ROUTE_ID: " + emsx_route_id.ToString() + "\tMESSAGE: " + message);
-
-                        IDSequenceMap matched = GetMapEntry(matchCorID);
-
-                        if (!matched.Equals(null))
+                        if(outstandingRequests.ContainsKey(matchCorID))
                         {
-                            System.Console.WriteLine("Request ID recognised(" + matched.requestID + ")...assinging SEQUENCE and ROUTE ID");
-                            matched.sequenceNo = emsx_sequence;
-                            matched.routeID = emsx_route_id;
+                            Request r;
+                            outstandingRequests.TryRemove(matchCorID,out r);
                         }
                         else
                         {
-                            System.Console.WriteLine("Request ID not recognised(" + matchCorID + ")...ignoring");
+                            log("Request ID not recognised(" + matchCorID + ")...ignoring");
                         }
                     }
                 }
@@ -438,24 +439,11 @@ namespace com.bloomberg.samples
 
         private void processMiscEvent(Event evt, Session session)
         {
-            System.Console.WriteLine("Processing " + evt.Type);
+            log("Processing " + evt.Type);
             foreach (Message msg in evt)
             {
-                System.Console.WriteLine("MESSAGE: " + msg);
+                log("MESSAGE: " + msg);
             }
-        }
-
-        private IDSequenceMap GetMapEntry(CorrelationID id)
-        {
-            foreach (IDSequenceMap find in idMapping)
-            {
-                if (find.requestID.Equals(id))
-                {
-                    return find;
-                }
-            }
-
-            return null;
         }
 
         private void sendRefDataRequest(Session session)
@@ -470,13 +458,13 @@ namespace com.bloomberg.samples
             Element fields = request.GetElement("fields");
             fields.AppendValue("PARSEKYABLE_DES_SOURCE");
 
-            System.Console.WriteLine("Sending Request: " + request);
+            log("Sending Request: " + request);
 
             refdata_req_id = new CorrelationID(3);
 
             session.SendRequest(request, refdata_req_id);
 
-            System.Console.WriteLine("Request sent.");
+            log("Request sent.");
 
         }
 
@@ -527,18 +515,18 @@ namespace com.bloomberg.samples
             order_sub_id = new CorrelationID(1);
 
             emsx_order_sub = new Subscription(orderTopic, order_sub_id);
-            System.Console.WriteLine("Order Topic: " + orderTopic);
+            log("Order Topic: " + orderTopic);
 
             emsxOrderSubscription.Add(emsx_order_sub);
 
             try
             {
                 session.Subscribe(emsxOrderSubscription);
-                System.Console.WriteLine("Order subscription sent");
+                log("Order subscription sent");
             }
             catch (Exception ex)
             {
-                System.Console.Error.WriteLine("Failed to create Order EMSX subscription: " + ex.Message);
+                logErr("Failed to create Order EMSX subscription: " + ex.Message);
             }
 
         }
@@ -585,7 +573,7 @@ namespace com.bloomberg.samples
             route_sub_id = new CorrelationID(2);
 
             emsx_route_sub = new Subscription(routeTopic, route_sub_id);
-            System.Console.WriteLine("Route Topic: " + routeTopic);
+            log("Route Topic: " + routeTopic);
             emsxRouteSubscription.Add(emsx_route_sub);
 
             try
@@ -594,7 +582,7 @@ namespace com.bloomberg.samples
             }
             catch (Exception ex)
             {
-                System.Console.Error.WriteLine("Failed to create Route EMSX subscription: " + ex.Message);
+                logErr("Failed to create Route EMSX subscription: " + ex.Message);
             }
         }
 
@@ -602,7 +590,7 @@ namespace com.bloomberg.samples
         {
             mktdata_sub_id = new CorrelationID(4);
             mktdata_sub = new Subscription(ticker, "BID, ASK", mktdata_sub_id);
-            System.Console.WriteLine("Market Data Topic: " + mktdata_sub);
+            log("Market Data Topic: " + mktdata_sub);
             mktdata_subscriptions.Add(mktdata_sub);
 
             try
@@ -611,7 +599,7 @@ namespace com.bloomberg.samples
             }
             catch (Exception ex)
             {
-                System.Console.Error.WriteLine("Failed to create Market Data subscription: " + ex.Message);
+                logErr("Failed to create Market Data subscription: " + ex.Message);
             }
 
         }
@@ -629,20 +617,47 @@ namespace com.bloomberg.samples
             request.Set("EMSX_SIDE", side);
             request.Set("EMSX_LIMIT_PRICE", limitPrice);
 
-            CorrelationID requestID = new CorrelationID(emsx_req_id++);
+            pendingTrades.Enqueue(request);
 
-            IDSequenceMap map = new IDSequenceMap();
-            map.requestID = requestID;
+        }
 
-            idMapping.Add(map);
+        public class Dispatcher
+        {
 
-            try
+            private ConcurrentQueue<Request> _pendingTrades;
+            private ConcurrentDictionary<CorrelationID, Request> _outstandingRequests;
+            private Session _session;
+
+            public Dispatcher(Session session, ConcurrentQueue<Request> pendingTrades, ConcurrentDictionary<CorrelationID, Request> outstandingRequests)
             {
-                System.Console.WriteLine("Sending " + side + " request at " + limitPrice);
-                session.SendRequest(request, requestID);
-            } catch (Exception ex)
+                this._session = session;
+                this._pendingTrades = pendingTrades;
+                this._outstandingRequests = outstandingRequests;
+            }
+
+            public void dispatch()
             {
-                System.Console.Error.WriteLine("Failed to send EMSX trade request: " + ex.Message);
+                while (true)
+                {
+
+                    Request nextReq;
+                    if(_pendingTrades.TryDequeue(out nextReq))
+                    {
+                        CorrelationID newCorrID = new CorrelationID();
+                        _outstandingRequests.TryAdd(newCorrID, nextReq);
+
+                        try
+                        {
+                            log("Sending " + nextReq.GetElement("EMSX_SIDE") + " request at " + nextReq.GetElement("EMSX_LIMIT_PRICE"));
+                            _session.SendRequest(nextReq, newCorrID);
+                        }
+                        catch (Exception ex)
+                        {
+                            _outstandingRequests.TryRemove(newCorrID, out nextReq);
+                            logErr("Failed to send EMSX trade request: " + ex.Message);
+                        }
+                    }
+                }
             }
         }
 
@@ -652,7 +667,7 @@ namespace com.bloomberg.samples
 
             if (args.Length < 4)
             {
-                System.Console.WriteLine("Error: Missing required parameters\n");
+                log("Error: Missing required parameters\n");
                 printUsage();
                 return false;
             }
@@ -666,7 +681,7 @@ namespace com.bloomberg.samples
                         if (!Array.Exists(pricePoints, element => element == sellat))
                         {
                             valid = false;
-                            System.Console.WriteLine("Error: Invalid SELLAT parameter value.");
+                            log("Error: Invalid SELLAT parameter value.");
                         }
                     }
                     else if (isArg(args[i], "BUYAT"))
@@ -675,7 +690,7 @@ namespace com.bloomberg.samples
                         if (!Array.Exists(pricePoints, element => element == buyat))
                         {
                             valid = false;
-                            System.Console.WriteLine("Error: Invalid BUYAT parameter value.");
+                            log("Error: Invalid BUYAT parameter value.");
                         }
                     }
                     else if (isArg(args[i], "AMOUNT")) amount = System.Convert.ToInt32(getArgValue(args[i]));
@@ -683,7 +698,7 @@ namespace com.bloomberg.samples
                     else
                     {
                         valid = false;
-                        System.Console.WriteLine("Warning>> Unknown parameter:" + args[i]);
+                        log("Warning>> Unknown parameter:" + args[i]);
                     }
 
                 }
@@ -694,11 +709,11 @@ namespace com.bloomberg.samples
 
         private void showParameters()
         {
-            System.Console.WriteLine("Parameter List:-");
-            System.Console.WriteLine("SELLAT: " + sellat);
-            System.Console.WriteLine("BUYAT: " + buyat);
-            System.Console.WriteLine("AMOUNT: " + amount);
-            System.Console.WriteLine("TICKER: " + ticker);
+            log("Parameter List:-");
+            log("SELLAT: " + sellat);
+            log("BUYAT: " + buyat);
+            log("AMOUNT: " + amount);
+            log("TICKER: " + ticker);
 
         }
 
@@ -715,8 +730,23 @@ namespace com.bloomberg.samples
 
         private void printUsage()
         {
-            System.Console.WriteLine("Usage:");
-            System.Console.WriteLine("EMSXCreateOrderAsyncRequest SELLAT=[BID,ASK] BUYAT=[BID,ASK] AMOUNT=<value> TICKER=\"<value>\"");
+            log("Usage:");
+            log("EMSXCreateOrderAsyncRequest SELLAT=[BID,ASK] BUYAT=[BID,ASK] AMOUNT=<value> TICKER=\"<value>\"");
+        }
+
+        public static void log(String message)
+        {
+            lock(logLock)
+            {
+                System.Console.WriteLine(message);
+            }
+        }
+        public static void logErr(String message)
+        {
+            lock (logLock)
+            {
+                System.Console.Error.WriteLine(message);
+            }
         }
     }
 }
