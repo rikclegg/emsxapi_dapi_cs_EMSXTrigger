@@ -71,7 +71,6 @@ namespace com.bloomberg.samples
         private static readonly Name SECURITY = new Name("security");
         private static readonly Name FIELD_DATA = new Name("fieldData");
 
-
         private Subscription emsx_order_sub;
         private Subscription emsx_route_sub;
         private List<Subscription> emsxOrderSubscription = new List<Subscription>();
@@ -112,6 +111,9 @@ namespace com.bloomberg.samples
         }
         
         private List<IDSequenceMap> idMapping = new List<IDSequenceMap>();
+
+        private double lastBid=0;
+        private double lastAsk=0;
 
         public static void Main(string[] args)
         {
@@ -314,12 +316,15 @@ namespace com.bloomberg.samples
                     double bidPrice = msg.HasElement("BID") ? msg.GetElementAsFloat64("BID") : 0;
                     double askPrice = msg.HasElement("ASK") ? msg.GetElementAsFloat64("ASK") : 0;
 
-                    if (bidPrice > 0 && askPrice > 0)
-                    {
-                        System.Console.WriteLine("Market data event at " + bidPrice + "/" + askPrice);
+                    if (bidPrice > 0) lastBid = bidPrice;
+                    if (askPrice > 0) lastAsk = askPrice;
 
-                        sendTradeRequest(session, "BUY", buyat == "BID" ? bidPrice : askPrice);
-                        sendTradeRequest(session, "SELL", sellat == "BID" ? bidPrice : askPrice);
+                    if ((bidPrice > 0 || askPrice > 0) && (lastBid > 0 && lastAsk > 0))
+                    {
+
+                        System.Console.WriteLine("Trading at " + bidPrice + "/" + askPrice);
+                        sendTradeRequest(session, "BUY", buyat == "BID" ? lastBid : lastAsk);
+                        sendTradeRequest(session, "SELL", sellat == "BID" ? lastBid : lastAsk);
                     }
                 }
                 else if (msg.CorrelationID == order_sub_id || msg.CorrelationID == route_sub_id)
@@ -418,7 +423,7 @@ namespace com.bloomberg.samples
 
                         if (!matched.Equals(null))
                         {
-                            System.Console.WriteLine("Request ID recognised(" + matched.requestID + ")...assining SEQUENCE and ROUTE ID");
+                            System.Console.WriteLine("Request ID recognised(" + matched.requestID + ")...assinging SEQUENCE and ROUTE ID");
                             matched.sequenceNo = emsx_sequence;
                             matched.routeID = emsx_route_id;
                         }
